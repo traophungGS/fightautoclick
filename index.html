@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fight Autoclick Addiction</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex items-center justify-center p-4 select-none">
+
+    <!-- Centered Content Wrapper -->
+    <div class="flex flex-col items-center justify-center text-center max-w-lg mx-auto space-y-8">
+        
+        <!-- Requested Sentence Above Button -->
+        <p class="text-slate-300 text-lg md:text-xl font-light leading-relaxed">
+            Slow down and enjoy the process. You're being overstimulated, and this site will fix it.
+        </p>
+
+        <!-- Main Button with Global Counter -->
+        <button 
+            id="clickerBtn"
+            class="px-8 py-5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-medium text-2xl rounded-2xl shadow-lg transition-all duration-150 transform active:scale-95 focus:outline-none focus:ring-4 focus:ring-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+        >
+            Clicks: <span id="counterDisplay">...</span>
+        </button>
+
+        <!-- Minimal Anti-Autoclick Warning Message -->
+        <div id="warningMessage" class="h-6 text-sm text-rose-400 font-medium opacity-0 transition-opacity duration-200">
+            Slow down! Autoclickers detected.
+        </div>
+    </div>
+
+    <!-- Firebase App and Firestore Import -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, increment } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global environment variables provided
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'fight-autoclick-app';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : {
+                // Fallback dummy config for preview if no environment config present
+                apiKey: "demo-api-key",
+                authDomain: "demo.firebaseapp.com",
+                projectId: "demo-project",
+                storageBucket: "demo.appspot.com",
+                messagingSenderId: "123456789",
+                appId: "1:123456789:web:demo"
+            };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // Firestore document reference for global public counter
+        const counterDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'counters', 'global_counter');
+
+        const counterDisplay = document.getElementById('counterDisplay');
+        const clickerBtn = document.getElementById('clickerBtn');
+        const warningMessage = document.getElementById('warningMessage');
+
+        let isAuthReady = false;
+        let warningTimeout = null;
+
+        // Anti-Autoclick State & Safety Settings
+        const MIN_INTERVAL_MS = 400; // Minimum allowed time between clicks (ms)
+        let lastClickTime = 0;
+        let recentIntervals = [];
+        const INTERVAL_HISTORY_SIZE = 5;
+
+        // Display transient anti-autoclick warning
+        function showWarning(text) {
+            warningMessage.textContent = text;
+            warningMessage.classList.remove('opacity-0');
+            clearTimeout(warningTimeout);
+            warningTimeout = setTimeout(() => {
+                warningMessage.classList.add('opacity-0');
+            }, 1800);
+        }
+
+        // Authenticate user before performing Firestore operations
+        async function authenticateUser() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (err) {
+                console.warn("Auth initialization fallback:", err);
+                // Try anonymous fallback if custom token fails
+                try {
+                    await signInAnonymously(auth);
+                } catch (e) {
+                    console.error("Anonymous auth failed", e);
+                }
+            }
+        }
+
+        // Listen for Auth changes and subscribe to counter doc
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                isAuthReady = true;
+                listenToCounter();
+            }
+        });
+
+        // Listen to Firestore Realtime updates
+        function listenToCounter() {
+            onSnapshot(counterDocRef, (snapshot) => {
+                if (snapshot.exists()) {
+                    const data = snapshot.data();
+                    counterDisplay.textContent = data.count !== undefined ? data.count : 0;
+                } else {
+                    // Initialize document if it doesn't exist
+                    setDoc(counterDocRef, { count: 0 }, { merge: true }).catch(console.error);
+                    counterDisplay.textContent = '0';
+                }
+            }, (error) => {
+                console.error("Firestore listener error:", error);
+                // Fallback if offline/permissions fail
+                if (counterDisplay.textContent === '...') {
+                    counterDisplay.textContent = '0';
+                }
+            });
+        }
+
+        // Anti-Autoclick Verification Logic
+        function isValidClick(event) {
+            // Check 1: Must be a trusted user event generated by real interaction
+            if (!event.isTrusted) {
+                showWarning("Automated events are strictly blocked.");
+                return false;
+            }
+
+            // Check 2: Detail check - programmatic dispatchEvent often sets detail to 0 or weird values
+            if (event.detail === 0 && event.type === 'click') {
+                showWarning("Invalid click trigger detected.");
+                return false;
+            }
+
+            const now = Date.now();
+            const timeSinceLastClick = now - lastClickTime;
+
+            // Check 3: Minimum rate limiting
+            if (timeSinceLastClick < MIN_INTERVAL_MS) {
+                showWarning("Too fast! Take a breath.");
+                return false;
+            }
+
+            // Check 4: Unnatural consistency check (detects fixed-frequency autoclickers)
+            if (lastClickTime !== 0) {
+                recentIntervals.push(timeSinceLastClick);
+                if (recentIntervals.length > INTERVAL_HISTORY_SIZE) {
+                    recentIntervals.shift();
+                }
+
+                if (recentIntervals.length === INTERVAL_HISTORY_SIZE) {
+                    // Calculate standard deviation of click intervals
+                    const mean = recentIntervals.reduce((a, b) => a + b, 0) / INTERVAL_HISTORY_SIZE;
+                    const variance = recentIntervals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / INTERVAL_HISTORY_SIZE;
+                    const stdDev = Math.sqrt(variance);
+
+                    // Real human clicks have natural variance; low variance implies autoclicker
+                    if (stdDev < 15) {
+                        showWarning("Constant interval detected! Please slow down.");
+                        return false;
+                    }
+                }
+            }
+
+            lastClickTime = now;
+            return true;
+        }
+
+        // Click Handler
+        async function handleClick(event) {
+            event.preventDefault();
+
+            // Run anti-autoclick security checks
+            if (!isValidClick(event)) {
+                return;
+            }
+
+            if (!isAuthReady) {
+                showWarning("Connecting to database...");
+                return;
+            }
+
+            // Optimistically update display
+            const currentVal = parseInt(counterDisplay.textContent, 10) || 0;
+            counterDisplay.textContent = currentVal + 1;
+
+            // Update real-time Firestore counter
+            try {
+                await setDoc(counterDocRef, { count: increment(1) }, { merge: true });
+            } catch (err) {
+                console.error("Failed to update counter:", err);
+            }
+        }
+
+        // Attach event listeners
+        clickerBtn.addEventListener('click', handleClick);
+
+        // Start initialization
+        authenticateUser();
+    </script>
+</body>
+</html>
